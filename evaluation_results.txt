@@ -1,0 +1,50 @@
+Engine: REAL langgraph package | LLM enabled: False
+
+====================================================================================================
+ TA1
+====================================================================================================
+ [PASS] 1 Simple order             expected: confirmed, stock 42 -> 37
+        got: Your order for 5x wireless_mouse is CONFIRMED. Courier: BudgetPost (5 business day(s)), shipping $3.75. Tracking: TRK-425D1A. Policy: §1.1, §2.1.
+ [FAIL] 2 Follow-up uses memory    expected: 2nd order of 3 confirmed, stock 42 -> 34
+        got: Sorry, I can only process a complete order (item, quantity, kg, km).
+ [FAIL] 3 Policy question (RAG)    expected: answer says 14 days, cites 6.1
+        got: Sorry, I can only process a complete order (item, quantity, kg, km).
+ [FAIL] 4 Not in the policy        expected: "I don't know"
+        got: Sorry, I can only process a complete order (item, quantity, kg, km).
+ [FAIL] 5 Wrong inventory answer   expected: declined (only 3 exist), stock stays 3
+        got: Your order for 4x mechanical_keyboard is CONFIRMED. Courier: EcoShip (4 business day(s)), shipping $16.70. Tracking: TRK-9961EF. Policy: §1.3, §2.1.
+
+====================================================================================================
+ TA2
+====================================================================================================
+ [PASS] 1 Simple order             expected: confirmed, stock 42 -> 37
+        got: Your order for 5x wireless_mouse is CONFIRMED. Courier: BudgetPost (5 business day(s)), shipping $3.75. Tracking: TRK-5A345C. Policy: §1.1, §2.1.
+ [PASS] 2 Follow-up uses memory    expected: 2nd order of 3 confirmed, stock 42 -> 34
+        got: Your order for 3x wireless_mouse is CONFIRMED. Courier: BudgetPost (5 business day(s)), shipping $3.75. Tracking: TRK-946073. Policy: §1.1, §2.1.
+ [PASS] 3 Policy question (RAG)    expected: answer says 14 days, cites 6.1
+        got: [6.1] Returns: Unopened items can be returned within 14 days of delivery for a full refund of the goods value.
+ [PASS] 4 Not in the policy        expected: "I don't know"
+        got: I don't know - the shipping policy does not say. (not covered: weekend)
+ [PASS] 5 Wrong inventory answer   expected: declined (only 3 exist), stock stays 3
+        got: Sorry, your order for 4x mechanical_keyboard cannot be fulfilled. Only 3 unit(s) in stock.
+
+====================================================================================================
+ PER-CASE COMPARISON
+====================================================================================================
+ Case                       TA1    TA2    TA1 nodes TA2 nodes TA2 hops   TA1 ms   TA2 ms
+ 1 Simple order             PASS   PASS           5         5        1     12.5     10.8
+ 2 Follow-up uses memory    FAIL   PASS           5        10        2      8.9     18.6
+ 3 Policy question (RAG)    FAIL   PASS           0         0        1      0.2      0.6
+ 4 Not in the policy        FAIL   PASS           0         0        1      0.1      0.5
+ 5 Wrong inventory answer   FAIL   PASS           5         2        1      8.4      5.2
+
+====================================================================================================
+ SUMMARY
+====================================================================================================
+ Metric                                          TA1        TA2
+ Cases passed (of 5)                             1/5        5/5
+ Accuracy                                        20%       100%
+ Cases leaving negative stock                      1          0
+ Graph nodes run (total)                          15         17
+ Supervisor hops (total)                           0          6
+ Mean latency per case (ms)                      6.0        7.1

@@ -1,0 +1,296 @@
+TA2 prototype | MAX_HOPS=8 | approval threshold=$500 | qwen2.5:3b + nomic-embed-text
+
+==========================================================================================
+ U3-1 SHORT-TERM MEMORY: checkpointer + thread_id
+==========================================================================================
+
+--- thread A, turn 1: full order
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 42 x wireless_mouse in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 42 >= 5
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 3.75, 'SpeedyExpress': 11.3, 'EcoShip': 5.1, 'LocalBike': 4.8}, refused [] -> BudgetPost wins at $3.75
+    [supervisor] hop 4 -> guard_agent
+    [guard_agent] goods $125.00 < $500 -> auto-approved
+    [supervisor] hop 5 -> order_agent
+    [order_agent] stock wireless_mouse -> 37, profile saved, message by LLM
+    [supervisor] hop 6 -> __end__
+    => status=confirmed | Order Confirmation: 5x wireless mice have been placed for delivery via BudgetPost courier service, expected in 5 days, with a shipping cost of $3.75.
+
+--- thread A, turn 2: only 'make it 3' (item, weight, distance come from the thread)
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 37 x wireless_mouse in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 37 >= 3
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 3.75, 'SpeedyExpress': 11.3, 'EcoShip': 5.1, 'LocalBike': 4.8}, refused [] -> BudgetPost wins at $3.75
+    [supervisor] hop 4 -> guard_agent
+    [guard_agent] goods $75.00 < $500 -> auto-approved
+    [supervisor] hop 5 -> order_agent
+    [order_agent] stock wireless_mouse -> 34, profile saved, message by LLM
+    [supervisor] hop 6 -> __end__
+    => status=confirmed | Order confirmation: 3 wireless mice have been placed for courier delivery via BudgetPost with a 5-day delivery timeframe and a shipping cost of $3.75.
+
+--- thread B (new thread_id), same 'make it 3': AMNESIA, the new thread knows nothing
+    [supervisor] hop 1 -> __end__
+    => status=need_info | Please tell me: item, weight, distance
+
+==========================================================================================
+ U3-2 LONG-TERM MEMORY: SqliteStore survives a restart
+==========================================================================================
+
+--- process 1: bob orders a monitor
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 10 x monitor in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 10 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 13.0, 'SpeedyExpress': 27.0, 'EcoShip': 14.3}, refused ['LocalBike'] -> BudgetPost wins at $13.00
+    [supervisor] hop 4 -> guard_agent
+    [guard_agent] goods $300.00 < $500 -> auto-approved
+    [supervisor] hop 5 -> order_agent
+    [order_agent] stock monitor -> 9, profile saved, message by LLM
+    [supervisor] hop 6 -> __end__
+    => status=confirmed | Order Confirmation: You have placed an order for 1x monitor with Courier BudgetPost for a total of $13.00 shipping fee, expected delivery in 5 days.
+
+--- program stopped. A NEW Python process starts and bob says only 'reorder' on a new thread:
+
+--- process 2: reorder
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 10 x monitor in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 10 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 13.0, 'SpeedyExpress': 27.0, 'EcoShip': 14.3}, refused ['LocalBike'] -> BudgetPost wins at $13.00
+    [supervisor] hop 4 -> guard_agent
+    [guard_agent] goods $300.00 < $500 -> auto-approved
+    [supervisor] hop 5 -> order_agent
+    [order_agent] stock monitor -> 9, profile saved, message by LLM
+    [supervisor] hop 6 -> __end__
+    => status=confirmed | Order Confirmation: You have placed an order for 1x monitor with Courier BudgetPost for a total of $13.00 shipping fee, expected delivery in 5 days.
+
+
+==========================================================================================
+ U3-3 RAG: Chroma + nomic-embed-text over shipping_policy.md
+==========================================================================================
+Chunks in Chroma: 14 (one per numbered clause)
+
+--- k=1: Which courier can carry a 40 kg parcel?
+    [supervisor] hop 1 -> policy_agent
+    [policy_agent] retrieved [('1.2', 0.78)] -> SpeedyExpress can carry a 40 kg parcel [1.2] [1.2]
+    [supervisor] hop 2 -> __end__
+    => status=answered | SpeedyExpress can carry a 40 kg parcel [1.2] [1.2]
+
+--- k=3: Which courier can carry a 40 kg parcel?
+    [supervisor] hop 1 -> policy_agent
+    [policy_agent] retrieved [('1.2', 0.78), ('1.1', 0.73), ('2.2', 0.71)] -> SpeedyExpress can carry a 40 kg parcel [1.2]
+    [supervisor] hop 2 -> __end__
+    => status=answered | SpeedyExpress can carry a 40 kg parcel [1.2]
+
+--- k=1: How long do I have to return an item?
+    [supervisor] hop 1 -> policy_agent
+    [policy_agent] retrieved [('6.1', 0.8)] -> Returns are accepted within 14 days [6.1].
+    [supervisor] hop 2 -> __end__
+    => status=answered | Returns are accepted within 14 days [6.1].
+
+--- k=3: How long do I have to return an item?
+    [supervisor] hop 1 -> policy_agent
+    [policy_agent] retrieved [('6.1', 0.8), ('6.2', 0.62), ('3.1', 0.56)] -> Returns are accepted within 14 days [6.1].
+    [supervisor] hop 2 -> __end__
+    => status=answered | Returns are accepted within 14 days [6.1].
+
+--- paraphrase: 'expensive order' should reach clause 3.1
+    [supervisor] hop 1 -> policy_agent
+    [policy_agent] retrieved [('3.1', 0.67), ('2.1', 0.61), ('4.2', 0.56)] -> I need permission for an expensive order [3.1]
+    [supervisor] hop 2 -> __end__
+    => status=answered | I need permission for an expensive order [3.1]
+
+--- unanswerable: the agent must refuse
+    [supervisor] hop 1 -> policy_agent
+    [policy_agent] retrieved [('2.1', 0.51), ('6.1', 0.51), ('6.2', 0.5)] -> I don't know - the shipping policy does not cover that.
+    [supervisor] hop 2 -> __end__
+    => status=answered | I don't know - the shipping policy does not cover that.
+
+==========================================================================================
+ U3-4 TOOL FAILURE: courier quote tool times out
+==========================================================================================
+
+--- 1 failure: caught, retried once, succeeds
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 10 x monitor in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 10 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] courier quote tool timed out (attempt 1) -> retrying once
+    [supervisor] hop 4 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 13.0, 'SpeedyExpress': 27.0, 'EcoShip': 14.3}, refused ['LocalBike'] -> BudgetPost wins at $13.00
+    [supervisor] hop 5 -> guard_agent
+    [guard_agent] goods $300.00 < $500 -> auto-approved
+    [supervisor] hop 6 -> order_agent
+    [order_agent] stock monitor -> 9, profile saved, message by LLM
+    [supervisor] hop 7 -> __end__
+    => status=confirmed | Order Confirmation: You have placed an order for 1x monitor with Courier BudgetPost for a total of $13.00 shipping fee, expected delivery in 5 days.
+
+--- 2 failures: caught, explained, nothing charged
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 9 x monitor in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 9 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] courier quote tool timed out (attempt 1) -> retrying once
+    [supervisor] hop 4 -> shipping_agent
+    [shipping_agent] courier quote tool timed out again -> FAILED, state saved
+    [supervisor] hop 5 -> __end__
+    => status=failed | Our courier price service is not responding. Nothing was charged; your order is saved and can be resumed.
+
+--- resume F2 from its checkpoint (inventory + guard are NOT repeated)
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 9 x monitor in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 9 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] courier quote tool timed out (attempt 1) -> retrying once
+    [supervisor] hop 4 -> shipping_agent
+    [shipping_agent] courier quote tool timed out again -> FAILED, state saved
+    [supervisor] hop 5 -> __end__
+    [resume] loaded checkpoint of thread F2: claim + verification kept, continuing from shipping
+    [supervisor] hop 1 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 13.0, 'SpeedyExpress': 27.0, 'EcoShip': 14.3}, refused ['LocalBike'] -> BudgetPost wins at $13.00
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] goods $300.00 < $500 -> auto-approved
+    [supervisor] hop 3 -> order_agent
+    [order_agent] stock monitor -> 8, profile saved, message by LLM
+    [supervisor] hop 4 -> __end__
+    => status=confirmed | Order Confirmation: You have placed an order for 1x monitor with Courier BudgetPost for a total of $13.00 shipping fee, expected delivery in 5 days.
+
+==========================================================================================
+ U4-2 COORDINATION: courier bidding (contract-net) + hop limit
+==========================================================================================
+
+--- 1.2 kg over 15 km
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 42 x wireless_mouse in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 42 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 3.75, 'SpeedyExpress': 11.3, 'EcoShip': 5.1, 'LocalBike': 4.8}, refused [] -> BudgetPost wins at $3.75
+    [supervisor] hop 4 -> guard_agent
+    [guard_agent] goods $25.00 < $500 -> auto-approved
+    [supervisor] hop 5 -> order_agent
+    [order_agent] stock wireless_mouse -> 41, profile saved, message by LLM
+    [supervisor] hop 6 -> __end__
+    => status=confirmed | Order Confirmation: You have ordered 1x wireless mouse, which will be shipped using the courier BudgetPost for a total shipping cost of $3.75, expected to arrive within 5 days.
+
+--- 40 kg over 800 km: only one courier eligible
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 10 x monitor in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 10 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'SpeedyExpress': 245.0}, refused ['BudgetPost', 'EcoShip', 'LocalBike'] -> SpeedyExpress wins at $245.00
+    [supervisor] hop 4 -> guard_agent
+    [guard_agent] goods $300.00 < $500 -> auto-approved
+    [supervisor] hop 5 -> order_agent
+    [order_agent] stock monitor -> 9, profile saved, message by LLM
+    [supervisor] hop 6 -> __end__
+    => status=confirmed | Order Confirmation: Your order for 1x monitor will be shipped by courier SpeedyExpress and is expected to arrive within 1 day. The total amount is $245.00.
+
+--- 80 kg: every courier refuses
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 9 x monitor in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 9 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] no courier can carry 80kg over 100km -> DECLINED
+    [supervisor] hop 4 -> __end__
+    => status=declined | Sorry, 1x monitor cannot be fulfilled: no courier can carry 80kg over 100km.
+
+--- runaway guard: same order with max_hops=3
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 9 x monitor in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 9 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 13.0, 'SpeedyExpress': 27.0, 'EcoShip': 14.3}, refused ['LocalBike'] -> BudgetPost wins at $13.00
+    [supervisor] hop 4 > MAX_HOPS=3 -> hop_limit
+    => status=hop_limit | Stopped: hop limit reached.
+
+==========================================================================================
+ U4-3 OVERSIGHT: human approval with interrupt()
+==========================================================================================
+
+--- 5 mice = $125
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 42 x wireless_mouse in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 42 >= 5
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 3.75, 'SpeedyExpress': 11.3, 'EcoShip': 5.1, 'LocalBike': 4.8}, refused [] -> BudgetPost wins at $3.75
+    [supervisor] hop 4 -> guard_agent
+    [guard_agent] goods $125.00 < $500 -> auto-approved
+    [supervisor] hop 5 -> order_agent
+    [order_agent] stock wireless_mouse -> 37, profile saved, message by LLM
+    [supervisor] hop 6 -> __end__
+    => status=confirmed | Order Confirmation: 5x wireless mice have been placed for delivery via BudgetPost courier service, expected in 5 days, with a shipping cost of $3.75.
+
+--- 20 mice = $500 exactly (rule is inclusive)
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 37 x wireless_mouse in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 37 >= 20
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 13.25, 'SpeedyExpress': 26.5, 'EcoShip': 12.7, 'LocalBike': 10.5}, refused [] -> LocalBike wins at $10.50
+    [supervisor] hop 4 -> guard_agent
+    PAUSED for human approval: {'order': '20x wireless_mouse', 'value': 500.0, 'courier': 'LocalBike', 'shipping': 10.5}
+    stock while waiting: 37 (nothing deducted)
+
+--- human APPROVES
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 37 x wireless_mouse in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 37 >= 20
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 13.25, 'SpeedyExpress': 26.5, 'EcoShip': 12.7, 'LocalBike': 10.5}, refused [] -> LocalBike wins at $10.50
+    [supervisor] hop 4 -> guard_agent
+    [guard_agent] $500.00 >= $500 -> APPROVED by human
+    [supervisor] hop 5 -> order_agent
+    [order_agent] stock wireless_mouse -> 17, profile saved, message by LLM
+    [supervisor] hop 6 -> __end__
+    => status=confirmed | Order Confirmation: Your order for 20x wireless mouse will be shipped by Courier LocalBike for 1 day and the shipping fee is $10.50.
+
+--- 1 laptop = $1,200 paused
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 5 x laptop in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 5 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 13.5, 'SpeedyExpress': 29.0, 'EcoShip': 17.1}, refused ['LocalBike'] -> BudgetPost wins at $13.50
+    [supervisor] hop 4 -> guard_agent
+    PAUSED for human approval: {'order': '1x laptop', 'value': 1200.0, 'courier': 'BudgetPost', 'shipping': 13.5}
+
+--- human REJECTS
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 5 x laptop in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] verified 5 >= 1
+    [supervisor] hop 3 -> shipping_agent
+    [shipping_agent] bids {'BudgetPost': 13.5, 'SpeedyExpress': 29.0, 'EcoShip': 17.1}, refused ['LocalBike'] -> BudgetPost wins at $13.50
+    [supervisor] hop 4 -> guard_agent
+    [guard_agent] $1200.00 order rejected by approver -> DECLINED
+    [supervisor] hop 5 -> __end__
+    => status=declined | Sorry, 1x laptop cannot be fulfilled: $1200.00 order rejected by approver.
+    laptop stock after rejection: 5
+
+==========================================================================================
+ U4-4 CHALLENGE: error propagation (inventory answer says 103, store has 3)
+==========================================================================================
+
+--- customer orders 10 keyboards ($1,200)
+    [supervisor] hop 1 -> inventory_agent
+    [inventory_agent] claims 103 x mechanical_keyboard in stock
+    [supervisor] hop 2 -> guard_agent
+    [guard_agent] DISCREPANCY: claim 103 but store has 3; only 3 in stock -> DECLINED
+    [supervisor] hop 3 -> __end__
+    => status=declined | Sorry, 10x mechanical_keyboard cannot be fulfilled: DISCREPANCY: claim 103 but store has 3; only 3 in stock.
+    keyboard stock: 3 | no bidding, no approval request, no commit

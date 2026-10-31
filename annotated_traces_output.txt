@@ -1,0 +1,235 @@
+LangGraph backend: REAL langgraph package
+OLLAMA_HOST      : (not set, using default)
+OLLAMA_MODEL     : qwen2.5:3b
+LLM enabled      : True
+
+Graph (Mermaid):
+flowchart TD
+    S([START]) -->|new order| A[check_inventory]
+    S -.->|resume_from checkpoint| R(( any node ))
+    A -- "proceed (inventory_ok)" --> B[calculate_shipping: courier auction]
+    A -- "decline" --> D[decline_order]
+    B -- "awarded" --> P[policy_lookup: RAG]
+    B -- "no eligible courier" --> D
+    P --> H[human_approval]
+    H -- "approved / below threshold" --> C[confirm_order: atomic commit]
+    H -- "rejected" --> D
+    H -- "pending: PAUSE (checkpoint)" --> E([END])
+    C -- "committed" --> E
+    C -- "commit refused" --> D
+    D --> E
+
+
+==============================================================================
+ CASE: A) Order that CAN be fulfilled (sufficient stock)
+==============================================================================
+ INPUT: item='wireless_mouse', qty=5, weight=1.2kg, distance=15km
+
+--- ANNOTATED EXECUTION TRACE ---
+   1. [check_inventory] Requested 5x 'wireless_mouse', found 42 in stock -> SUFFICIENT (inventory_ok=True); ROUTE -> calculate_shipping
+   2. [calculate_shipping] Call for proposals: weight=1.2kg, distance=15km -> 4 couriers invited, 4 bids, 0 refusals
+   3. [calculate_shipping]   bid    BudgetPost     $3.75     5 day(s)
+   4. [calculate_shipping]   bid    SpeedyExpress  $11.30    1 day(s)
+   5. [calculate_shipping]   bid    EcoShip        $5.10     4 day(s)
+   6. [calculate_shipping]   bid    LocalBike      $4.80     1 day(s)
+   7. [calculate_shipping] AWARD -> BudgetPost at $3.75 (cheapest eligible bid)
+   8. [policy_lookup] Query 'BudgetPost courier eligibility delivery time' -> retrieved §1.1 'BudgetPost' (score 4.52), §2.1 'Bidding' (score 2.52)
+   9. [human_approval] Goods value $125.00 < $500.00 threshold -> auto-approved
+  10. [confirm_order] Committed (stock deducted atomically, BudgetPost booked, TRK-D22160). LLM (qwen2.5:3b) wrote the message; grounding check passed.
+
+--- COURIER BID TABLE (contract-net) ---
+  Courier         Status    Price     ETA     Result
+  --------------  --------  --------  ------  ------------------------------------
+  BudgetPost      BID       $3.75     5 d     << WINNER (cheapest eligible)
+  SpeedyExpress   BID       $11.30    1 d     outbid
+  EcoShip         BID       $5.10     4 d     outbid
+  LocalBike       BID       $4.80     1 d     outbid
+
+  Node path : check_inventory -> calculate_shipping -> policy_lookup -> human_approval -> confirm_order
+  Not run   : decline_order
+
+  Why each node ran:
+    - check_inventory: Inventory agent answers, Order agent verifies against the store; decides the route.
+    - calculate_shipping: Shipping agent's contract-net auction. Runs ONLY on the 'proceed' branch.
+    - policy_lookup: RAG: retrieves the relevant shipping-policy clauses (BM25) to cite in the result.
+    - human_approval: High-value rule: goods value >= $500.00 pauses for a human decision.
+    - confirm_order: Order agent commits: atomic guarded stock decrement + courier booking, then LLM phrases the message.
+
+--- FINAL CUSTOMER-FACING MESSAGE ---
+  [CONFIRMED] Thank you for your order of 5 wireless mice. Your delivery will be via BudgetPost and is expected in 5 days. The shipping cost is $3.75. Is there anything else I can assist you with? Policy: §1.1, §2.1.
+  (message written by: LLM qwen2.5:3b)
+
+--- RAW FINAL STATE (for jury inspection) ---
+{
+  "thread_id": "d2216041",
+  "item": "wireless_mouse",
+  "requested_qty": 5,
+  "weight_kg": 1.2,
+  "distance_km": 15,
+  "verify_inventory": true,
+  "safe_commit": true,
+  "inventory_fault": "",
+  "crash_after": "",
+  "agent_claimed_qty": 42,
+  "verified_qty": 42,
+  "available_qty": 42,
+  "unit_price": 25.0,
+  "order_value": 125.0,
+  "inventory_ok": true,
+  "route": "proceed",
+  "courier": "BudgetPost",
+  "eta_days": 5,
+  "shipping_cost": 3.75,
+  "policy_refs": [
+    "1.1",
+    "2.1"
+  ],
+  "approval_required": false,
+  "approval": "approved",
+  "approver": "auto (below threshold)",
+  "commit_ok": true,
+  "tracking_ref": "TRK-D22160",
+  "status": "confirmed",
+  "final_message": "Thank you for your order of 5 wireless mice. Your delivery will be via BudgetPost and is expected in 5 days. The shipping cost is $3.75. Is there anything else I can assist you with? Policy: \u00a71.1, \u00a72.1.",
+  "llm_used": true,
+  "step": 5
+}
+
+==============================================================================
+ CASE: B) Order that CANNOT be fulfilled (insufficient stock: want 10, have 3)
+==============================================================================
+ INPUT: item='mechanical_keyboard', qty=10, weight=8.0kg, distance=40km
+
+--- ANNOTATED EXECUTION TRACE ---
+   1. [check_inventory] Requested 10x 'mechanical_keyboard', found 3 in stock -> INSUFFICIENT (inventory_ok=False); ROUTE -> decline_order
+   2. [decline_order] reason=insufficient_stock. LLM (qwen2.5:3b) wrote the message; grounding check passed. Order logged in SQLite.
+
+  Node path : check_inventory -> decline_order
+  Not run   : calculate_shipping, policy_lookup, human_approval, confirm_order
+
+  Why each node ran:
+    - check_inventory: Inventory agent answers, Order agent verifies against the store; decides the route.
+    - decline_order: Terminal failure node, reached only through a conditional edge. Logs the order in SQLite.
+
+--- FINAL CUSTOMER-FACING MESSAGE ---
+  [DECLINED] I'm sorry, but we only have 3 mechanical keyboards available at this time and cannot fulfill your request for 10.
+  (message written by: LLM qwen2.5:3b)
+
+--- RAW FINAL STATE (for jury inspection) ---
+{
+  "thread_id": "c5195ab7",
+  "item": "mechanical_keyboard",
+  "requested_qty": 10,
+  "weight_kg": 8.0,
+  "distance_km": 40,
+  "verify_inventory": true,
+  "safe_commit": true,
+  "inventory_fault": "",
+  "crash_after": "",
+  "agent_claimed_qty": 3,
+  "verified_qty": 3,
+  "available_qty": 3,
+  "unit_price": 120.0,
+  "order_value": 0.0,
+  "inventory_ok": false,
+  "route": "decline",
+  "decline_reason": "insufficient_stock",
+  "approval": "",
+  "status": "declined",
+  "final_message": "I'm sorry, but we only have 3 mechanical keyboards available at this time and cannot fulfill your request for 10.",
+  "llm_used": true,
+  "step": 2
+}
+
+==============================================================================
+ CASE: C) Edge case: item completely out of stock (usb_c_hub = 0)
+==============================================================================
+ INPUT: item='usb_c_hub', qty=1, weight=0.3kg, distance=10km
+
+--- ANNOTATED EXECUTION TRACE ---
+   1. [check_inventory] Requested 1x 'usb_c_hub', found 0 in stock -> INSUFFICIENT (inventory_ok=False); ROUTE -> decline_order
+   2. [decline_order] reason=out_of_stock. LLM reply failed grounding check (stock number missing) -> used deterministic template. Order logged in SQLite.
+
+  Node path : check_inventory -> decline_order
+  Not run   : calculate_shipping, policy_lookup, human_approval, confirm_order
+
+  Why each node ran:
+    - check_inventory: Inventory agent answers, Order agent verifies against the store; decides the route.
+    - decline_order: Terminal failure node, reached only through a conditional edge. Logs the order in SQLite.
+
+--- FINAL CUSTOMER-FACING MESSAGE ---
+  [DECLINED] Sorry, your order for 1x usb_c_hub cannot be fulfilled. Only 0 unit(s) in stock.
+  (message written by: deterministic template)
+
+--- RAW FINAL STATE (for jury inspection) ---
+{
+  "thread_id": "acabe065",
+  "item": "usb_c_hub",
+  "requested_qty": 1,
+  "weight_kg": 0.3,
+  "distance_km": 10,
+  "verify_inventory": true,
+  "safe_commit": true,
+  "inventory_fault": "",
+  "crash_after": "",
+  "agent_claimed_qty": 0,
+  "verified_qty": 0,
+  "available_qty": 0,
+  "unit_price": 40.0,
+  "order_value": 0.0,
+  "inventory_ok": false,
+  "route": "decline",
+  "decline_reason": "out_of_stock",
+  "approval": "",
+  "status": "declined",
+  "final_message": "Sorry, your order for 1x usb_c_hub cannot be fulfilled. Only 0 unit(s) in stock.",
+  "llm_used": false,
+  "step": 2
+}
+
+==============================================================================
+ CASE: D) Edge case: invalid quantity (0)
+==============================================================================
+ INPUT: item='wireless_mouse', qty=0, weight=1.0kg, distance=10km
+
+--- ANNOTATED EXECUTION TRACE ---
+   1. [check_inventory] Quantity 0 is not a positive integer -> INVALID (inventory_ok=False); ROUTE -> decline_order
+   2. [decline_order] reason=invalid_quantity. Fixed template used (no LLM needed). Order logged in SQLite.
+
+  Node path : check_inventory -> decline_order
+  Not run   : calculate_shipping, policy_lookup, human_approval, confirm_order
+
+  Why each node ran:
+    - check_inventory: Inventory agent answers, Order agent verifies against the store; decides the route.
+    - decline_order: Terminal failure node, reached only through a conditional edge. Logs the order in SQLite.
+
+--- FINAL CUSTOMER-FACING MESSAGE ---
+  [DECLINED] Sorry, the requested quantity (0) is not valid. Please enter a whole number of at least 1.
+  (message written by: deterministic template)
+
+--- RAW FINAL STATE (for jury inspection) ---
+{
+  "thread_id": "67290338",
+  "item": "wireless_mouse",
+  "requested_qty": 0,
+  "weight_kg": 1.0,
+  "distance_km": 10,
+  "verify_inventory": true,
+  "safe_commit": true,
+  "inventory_fault": "",
+  "crash_after": "",
+  "available_qty": 37,
+  "order_value": 0.0,
+  "inventory_ok": false,
+  "route": "decline",
+  "decline_reason": "invalid_quantity",
+  "approval": "",
+  "status": "declined",
+  "final_message": "Sorry, the requested quantity (0) is not valid. Please enter a whole number of at least 1.",
+  "llm_used": false,
+  "step": 2
+}
+
+==============================================================================
+ Next: run  python jury2_demo.py  for the Unit 3 / Unit 4 evidence
+==============================================================================

@@ -1,0 +1,280 @@
+LangGraph backend: REAL langgraph package
+OLLAMA_HOST      : (not set, using default)
+OLLAMA_MODEL     : qwen2.5:3b
+LLM enabled      : True
+
+##############################################################################
+# UNIT 3 / EVIDENCE 1: SQLite as persistent inventory + order store
+##############################################################################
+Fresh database created at: /var/folders/cq/0g57zd3n1dn9sftvqt6dr9000000gn/T/orders_7auclhqo/orders.db
+  inventory table:
+    laptop               stock=5    unit_price=$1200.00
+    wireless_mouse       stock=42   unit_price=$25.00
+
+Placed order 7d5ca628: 5x wireless_mouse -> confirmed
+
+-- 'restarting the program' (new connection, new graph object) --
+  inventory table:
+    laptop               stock=5    unit_price=$1200.00
+    wireless_mouse       stock=37   unit_price=$25.00
+  orders table:
+    7d5ca628  wireless_mouse       qty=5   value=$125.00   status=confirmed          courier=BudgetPost reason=None
+  shipments table: [('7d5ca628', 'BudgetPost', 'TRK-7D5CA6')]
+
+  -> stock went 42 -> 37 and the order + shipment survived the restart: the data lives in SQLite, not in memory.
+
+##############################################################################
+# UNIT 3 / EVIDENCE 2: checkpointer - resume an interrupted order
+##############################################################################
+
+==============================================================================
+ Step 1: start a laptop order but CRASH right after the courier auction
+==============================================================================
+   [check_inventory] Requested 1x 'laptop', found 5 in stock -> SUFFICIENT (inventory_ok=True); ROUTE -> calculate_shipping
+   [calculate_shipping] Call for proposals: weight=3.0kg, distance=120km -> 4 couriers invited, 3 bids, 1 refusals
+   [calculate_shipping]   bid    BudgetPost     $13.50    5 day(s)
+   [calculate_shipping]   bid    SpeedyExpress  $29.00    1 day(s)
+   [calculate_shipping]   bid    EcoShip        $17.10    4 day(s)
+   [calculate_shipping]   refuse LocalBike      (distance 120km > limit 20km)
+   [calculate_shipping] AWARD -> BudgetPost at $13.50 (cheapest eligible bid)
+   [CRASH] simulated crash after 'calculate_shipping' (step 2). Progress is safe in SQLite (checkpoint step 2).
+
+  checkpoints saved in SQLite: [(1, 'check_inventory'), (2, 'calculate_shipping')]
+  order row: {'status': 'interrupted', 'courier': 'BudgetPost'}
+  inventory table:
+    laptop               stock=5    unit_price=$1200.00
+
+==============================================================================
+ Step 2: 'restart the program' and resume from the checkpoint (inventory is NOT re-checked)
+==============================================================================
+   [resume] Loaded checkpoint step 2 (after 'calculate_shipping') from SQLite; continuing at 'policy_lookup'. Earlier nodes are NOT re-run.
+   [policy_lookup] Query 'BudgetPost courier eligibility delivery time high-value order human approval threshold' -> retrieved §3.1 'Approval threshold' (score 10.76), §1.1 'BudgetPost' (score 4.52)
+   [human_approval] Goods value $1200.00 >= $500.00 threshold -> PAUSED, waiting for a human (stock on hand per Inventory agent: 5; courier BudgetPost $13.50). Nothing is deducted yet.
+
+  status now: awaiting_approval (laptop is >= $500.00 so it pauses for a human)
+  check_inventory appears in the trace 1 time(s) -> it was not repeated after the resume.
+
+==============================================================================
+ Step 3: restart AGAIN while waiting for approval, then approve
+==============================================================================
+   [resume] Loaded checkpoint step 4 (after 'human_approval') from SQLite; continuing at 'human_approval'. Earlier nodes are NOT re-run.
+   [human_approval] Goods value $1200.00 >= $500.00: human decision received -> APPROVED by manager
+   [confirm_order] Committed (stock deducted atomically, BudgetPost booked, TRK-9F2976). LLM (qwen2.5:3b) wrote the message; grounding check passed.
+  inventory table:
+    laptop               stock=4    unit_price=$1200.00
+  orders table:
+    9f2976d8  laptop               qty=1   value=$1200.00  status=confirmed          courier=BudgetPost reason=None
+  shipments table: [('9f2976d8', 'BudgetPost', 'TRK-9F2976')]
+
+  -> stock was deducted exactly once (5 -> 4). The commit is idempotent per thread_id, so a retry cannot double-deduct.
+
+##############################################################################
+# UNIT 3 / EVIDENCE 3: RAG over shipping_policy.md
+##############################################################################
+Indexed 14 policy clauses: ['1.1', '1.2', '1.3', '1.4', '2.1', '2.2', '3.1', '3.2', '4.1', '4.2', '5.1', '5.2', '6.1', '6.2']
+
+==============================================================================
+ Q: Which courier can carry a 40 kg parcel?
+==============================================================================
+  retrieved: [('1.2', 4.18), ('1.1', 3.87), ('2.2', 3.01)]
+  answer : [1.2] SpeedyExpress can carry a 40 kg parcel.
+  method : llm (grounded) | sources: ['1.2', '1.1', '2.2']
+
+==============================================================================
+ Q: When do I need approval for an expensive order?
+==============================================================================
+  retrieved: [('3.1', 5.44), ('3.2', 3.02), ('6.1', 2.18)]
+  answer : [3.1] Approval is needed for orders whose goods value is 500.00 USD or more.
+  method : llm (grounded) | sources: ['3.1', '3.2', '6.1']
+
+==============================================================================
+ Q: How long do I have to return an item?
+==============================================================================
+  retrieved: [('6.1', 5.61)]
+  answer : You have 14 days to return an item after delivery for a full refund [6.1].
+  method : llm (grounded) | sources: ['6.1']
+
+  Inside the workflow, the policy_lookup node runs the same retrieval and the confirmation cites the clauses (e.g. 'Policy: §1.1, §2.1').
+
+##############################################################################
+# UNIT 4 / EVIDENCE 1: contract-net bidding (cheapest eligible courier wins)
+##############################################################################
+
+==============================================================================
+ Light parcel, short trip: 1.2kg over 15km
+==============================================================================
+  Courier         Status    Price     ETA     Result
+  --------------  --------  --------  ------  ------------------------------------
+  BudgetPost      BID       $3.75     5 d     << WINNER (cheapest eligible)
+  SpeedyExpress   BID       $11.30    1 d     outbid
+  EcoShip         BID       $5.10     4 d     outbid
+  LocalBike       BID       $4.80     1 d     outbid
+  -> status=confirmed  courier=BudgetPost  reason=None
+
+==============================================================================
+ Tiny local parcel: 2.0kg over 10km
+==============================================================================
+  Courier         Status    Price     ETA     Result
+  --------------  --------  --------  ------  ------------------------------------
+  BudgetPost      BID       $5.50     5 d     outbid
+  SpeedyExpress   BID       $14.00    1 d     outbid
+  EcoShip         BID       $6.30     4 d     outbid
+  LocalBike       BID       $5.00     1 d     << WINNER (cheapest eligible)
+  -> status=confirmed  courier=LocalBike  reason=None
+
+==============================================================================
+ Heavy, long distance (only one courier is eligible): 40.0kg over 800km
+==============================================================================
+  Courier         Status    Price     ETA     Result
+  --------------  --------  --------  ------  ------------------------------------
+  BudgetPost      REFUSED   -         -       weight 40.0kg > limit 30kg
+  SpeedyExpress   BID       $245.00   1 d     << WINNER (cheapest eligible)
+  EcoShip         REFUSED   -         -       weight 40.0kg > limit 15kg
+  LocalBike       REFUSED   -         -       weight 40.0kg > limit 5kg
+  -> status=awaiting_approval  courier=SpeedyExpress  reason=None
+     (monitor x2 = $600 is a high-value order, so it paused for approval after the auction)
+
+==============================================================================
+ Too heavy for everyone -> order declined: 80.0kg over 100km
+==============================================================================
+  Courier         Status    Price     ETA     Result
+  --------------  --------  --------  ------  ------------------------------------
+  BudgetPost      REFUSED   -         -       weight 80.0kg > limit 30kg
+  SpeedyExpress   REFUSED   -         -       weight 80.0kg > limit 50kg
+  EcoShip         REFUSED   -         -       weight 80.0kg > limit 15kg
+  LocalBike       REFUSED   -         -       weight 80.0kg > limit 5kg
+  -> status=declined  courier=None  reason=no_courier_available
+
+##############################################################################
+# UNIT 4 / EVIDENCE 2: human approval for high-value orders
+##############################################################################
+Rule: goods value (qty x unit price, shipping excluded) >= $500.00 -> human must approve.
+
+==============================================================================
+ a) $125 order (5 mice): below the threshold -> auto-approved
+==============================================================================
+   [human_approval] Goods value $125.00 < $500.00 threshold -> auto-approved
+   status: confirmed
+
+==============================================================================
+ b) EXACTLY $500 (20 mice): the rule is >=, so it needs approval
+==============================================================================
+   [human_approval] Goods value $500.00 >= $500.00 threshold -> PAUSED, waiting for a human (stock on hand per Inventory agent: 37; courier LocalBike $10.50). Nothing is deducted yet.
+   status: awaiting_approval
+   after approval -> confirmed
+
+==============================================================================
+ c) $1,200 laptop: paused, then APPROVED
+==============================================================================
+   [human_approval] Goods value $1200.00 >= $500.00 threshold -> PAUSED, waiting for a human (stock on hand per Inventory agent: 5; courier BudgetPost $13.50). Nothing is deducted yet.
+   status: awaiting_approval | stock still 5 (nothing deducted while waiting)
+   [human_approval] Goods value $1200.00 >= $500.00: human decision received -> APPROVED by manager
+   status: confirmed | stock now 4
+
+==============================================================================
+ d) $600 (2 monitors): paused, then REJECTED
+==============================================================================
+
+--- ANNOTATED EXECUTION TRACE ---
+   1. [check_inventory] Requested 2x 'monitor', found 10 in stock -> SUFFICIENT (inventory_ok=True); ROUTE -> calculate_shipping
+   2. [calculate_shipping] Call for proposals: weight=12.0kg, distance=30km -> 4 couriers invited, 3 bids, 1 refusals
+   3. [calculate_shipping]   bid    BudgetPost     $31.50    5 day(s)
+   4. [calculate_shipping]   bid    SpeedyExpress  $56.00    1 day(s)
+   5. [calculate_shipping]   bid    EcoShip        $27.90    4 day(s)
+   6. [calculate_shipping]   refuse LocalBike      (weight 12.0kg > limit 5kg)
+   7. [calculate_shipping] AWARD -> EcoShip at $27.90 (cheapest eligible bid)
+   8. [policy_lookup] Query 'EcoShip courier eligibility delivery time high-value order human approval threshold' -> retrieved §3.1 'Approval threshold' (score 10.76), §1.3 'EcoShip' (score 4.28)
+   9. [human_approval] Goods value $600.00 >= $500.00 threshold -> PAUSED, waiting for a human (stock on hand per Inventory agent: 10; courier EcoShip $27.90). Nothing is deducted yet.
+  10. [resume] Loaded checkpoint step 4 (after 'human_approval') from SQLite; continuing at 'human_approval'. Earlier nodes are NOT re-run.
+  11. [human_approval] Goods value $600.00 >= $500.00: human decision received -> REJECTED by manager
+  12. [decline_order] reason=rejected_by_approver. Fixed template used (no LLM needed). Order logged in SQLite.
+
+--- COURIER BID TABLE (contract-net) ---
+  Courier         Status    Price     ETA     Result
+  --------------  --------  --------  ------  ------------------------------------
+  BudgetPost      BID       $31.50    5 d     outbid
+  SpeedyExpress   BID       $56.00    1 d     outbid
+  EcoShip         BID       $27.90    4 d     << WINNER (cheapest eligible)
+  LocalBike       REFUSED   -         -       weight 12.0kg > limit 5kg
+
+  Node path : check_inventory -> calculate_shipping -> policy_lookup -> human_approval -> decline_order
+  Not run   : confirm_order
+
+  Why each node ran:
+    - check_inventory: Inventory agent answers, Order agent verifies against the store; decides the route.
+    - calculate_shipping: Shipping agent's contract-net auction. Runs ONLY on the 'proceed' branch.
+    - policy_lookup: RAG: retrieves the relevant shipping-policy clauses (BM25) to cite in the result.
+    - human_approval: High-value rule: goods value >= $500.00 pauses for a human decision.
+    - decline_order: Terminal failure node, reached only through a conditional edge. Logs the order in SQLite.
+
+--- FINAL CUSTOMER-FACING MESSAGE ---
+  [DECLINED] (none yet)
+  (message written by: deterministic template)
+   monitor stock still 10
+  orders table:
+    99fe1572  wireless_mouse       qty=5   value=$125.00   status=confirmed          courier=BudgetPost reason=None
+    a5ca1477  wireless_mouse       qty=20  value=$500.00   status=confirmed          courier=LocalBike reason=None
+    0f0b6647  laptop               qty=1   value=$1200.00  status=confirmed          courier=BudgetPost reason=None
+    f7106fc3  monitor              qty=2   value=$600.00   status=declined           courier=EcoShip reason=rejected_by_approver
+  shipments table: [('99fe1572', 'BudgetPost', 'TRK-99FE15'), ('a5ca1477', 'LocalBike', 'TRK-A5CA14'), ('0f0b6647', 'BudgetPost', 'TRK-0F0B66')]
+
+##############################################################################
+# UNIT 4 / EVIDENCE 3: error propagation - a WRONG inventory answer flows downstream
+##############################################################################
+Setup: the store really has 3 mechanical_keyboards (unit price $120). The Inventory agent is made to
+answer WRONGLY (stale cache: claims 103). A customer orders 10 keyboards (worth $1,200).
+
+==============================================================================
+ A) NO FIX (trust the agent, unguarded stock update)
+==============================================================================
+   [check_inventory] Requested 10x 'mechanical_keyboard', found 103 in stock -> SUFFICIENT (inventory_ok=True); ROUTE -> calculate_shipping [UNVERIFIED claim from Inventory agent, source=STALE-CACHE (faulty)]
+   [calculate_shipping] Call for proposals: weight=8.0kg, distance=40km -> 4 couriers invited, 3 bids, 1 refusals
+   [calculate_shipping]   bid    BudgetPost     $22.00    5 day(s)
+   [calculate_shipping]   bid    SpeedyExpress  $41.00    1 day(s)
+   [calculate_shipping]   bid    EcoShip        $20.70    4 day(s)
+   [calculate_shipping]   refuse LocalBike      (weight 8.0kg > limit 5kg)
+   [calculate_shipping] AWARD -> EcoShip at $20.70 (cheapest eligible bid)
+   [policy_lookup] Query 'EcoShip courier eligibility delivery time high-value order human approval threshold' -> retrieved §3.1 'Approval threshold' (score 10.76), §1.3 'EcoShip' (score 4.28)
+   [human_approval] Goods value $1200.00 >= $500.00 threshold -> PAUSED, waiting for a human (stock on hand per Inventory agent: 103; courier EcoShip $20.70). Nothing is deducted yet.
+   [resume] Loaded checkpoint step 4 (after 'human_approval') from SQLite; continuing at 'human_approval'. Earlier nodes are NOT re-run.
+   [human_approval] Goods value $1200.00 >= $500.00: human decision received -> APPROVED by manager
+   [confirm_order] Committed (stock deducted atomically, EcoShip booked, TRK-607636). LLM (qwen2.5:3b) wrote the message; grounding check passed.
+
+==============================================================================
+ B) PARTIAL FIX (commit guard only)
+==============================================================================
+   [check_inventory] Requested 10x 'mechanical_keyboard', found 103 in stock -> SUFFICIENT (inventory_ok=True); ROUTE -> calculate_shipping [UNVERIFIED claim from Inventory agent, source=STALE-CACHE (faulty)]
+   [calculate_shipping] Call for proposals: weight=8.0kg, distance=40km -> 4 couriers invited, 3 bids, 1 refusals
+   [calculate_shipping]   bid    BudgetPost     $22.00    5 day(s)
+   [calculate_shipping]   bid    SpeedyExpress  $41.00    1 day(s)
+   [calculate_shipping]   bid    EcoShip        $20.70    4 day(s)
+   [calculate_shipping]   refuse LocalBike      (weight 8.0kg > limit 5kg)
+   [calculate_shipping] AWARD -> EcoShip at $20.70 (cheapest eligible bid)
+   [policy_lookup] Query 'EcoShip courier eligibility delivery time high-value order human approval threshold' -> retrieved §3.1 'Approval threshold' (score 10.76), §1.3 'EcoShip' (score 4.28)
+   [human_approval] Goods value $1200.00 >= $500.00 threshold -> PAUSED, waiting for a human (stock on hand per Inventory agent: 103; courier EcoShip $20.70). Nothing is deducted yet.
+   [resume] Loaded checkpoint step 4 (after 'human_approval') from SQLite; continuing at 'human_approval'. Earlier nodes are NOT re-run.
+   [human_approval] Goods value $1200.00 >= $500.00: human decision received -> APPROVED by manager
+   [confirm_order] COMMIT REFUSED: the guarded stock update found less stock than requested (stock changed since the check) -> ROUTE -> decline_order
+   [decline_order] reason=commit_failed. Fixed template used (no LLM needed). Order logged in SQLite.
+
+==============================================================================
+ C) FULL FIX (verify the claim + commit guard)
+==============================================================================
+   [check_inventory] DISCREPANCY: Inventory agent claimed 103 (STALE-CACHE (faulty)) but the authoritative store has 3 -> using the store value
+   [check_inventory] Requested 10x 'mechanical_keyboard', found 3 in stock -> INSUFFICIENT (inventory_ok=False); ROUTE -> decline_order
+   [decline_order] reason=insufficient_stock. LLM (qwen2.5:3b) wrote the message; grounding check passed. Order logged in SQLite.
+
+==============================================================================
+ DAMAGE REPORT (what the wrong answer caused downstream)
+==============================================================================
+  Scenario   Agent said  Truth  Courier  Human     Stock   Order status Verdict
+  ---------- ----------- ------ -------- --------- ------- ----------- ----------------------------------------
+  A          103         3      BOOKED   asked     -7      confirmed   OVERSOLD: sold 10, had 3, stock is negative, courier booked for goods that do not exist
+  B          103         3      no       asked     3       declined    No oversell, but a courier auction + a manager's time were wasted on a bogus order
+  C          103         3      no       not asked 3       declined    Caught at step 1 (DISCREPANCY). No auction, no approval request, no damage
+
+  Where damage happened in A: (1) shipping auction ran on a fantasy quantity, (2) the approver was shown
+  'stock on hand: 103' and approved on false information, (3) the ledger was corrupted: stock = -7 and a
+  confirmed order + shipment exist for 7 units that never existed.
+  The fix has two layers: B stops the corruption at commit time (defense in depth); C stops the error
+  at its source, so no downstream agent ever acts on it.

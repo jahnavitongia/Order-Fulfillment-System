@@ -1,0 +1,45 @@
+Running each case on TA1 then TA2 (live Ollama: qwen2.5:3b, nomic-embed-text)
+    TA2 case 5 answers: 'Returns are accepted within 14 days [6.1].' | "I don't know - the shipping policy does not cover that."
+
+========================================================================================================
+ PER-CHECK RESULTS
+========================================================================================================
+
+ Case 1: Wrong inventory answer: claims 103, has 3
+    declined                             TA1 FAIL   TA2 PASS
+    no shipping on bad data              TA1 FAIL   TA2 PASS
+    no oversell                          TA1 FAIL   TA2 PASS
+
+ Case 2: Basic order: 5 mice, 1.2 kg, 15 km
+    confirmed                            TA1 PASS   TA2 PASS
+    shipping $3.75                       TA1 PASS   TA2 PASS
+    stock 42->37                         TA1 FAIL   TA2 PASS
+
+ Case 3: High-value order: 40 mice = $1,000
+    paused for a human                   TA1 FAIL   TA2 PASS
+    nothing deducted while waiting       TA1 FAIL   TA2 PASS
+    approved -> confirmed, stock 2       TA1 FAIL   TA2 PASS
+
+ Case 4: Follow-up 'make it 3' on the same thread
+    follow-up confirmed                  TA1 FAIL   TA2 PASS
+    item recalled from thread            TA1 FAIL   TA2 PASS
+    stock 42->34                         TA1 FAIL   TA2 PASS
+
+ Case 5: Policy question + refusal + qty 0
+    answers 14 days citing [6.1]         TA1 FAIL   TA2 PASS
+    says I don't know                    TA1 FAIL   TA2 PASS
+    qty 0 refused                        TA1 FAIL   TA2 PASS
+
+========================================================================================================
+ COMPARISON TABLE (copy to slide 13)
+========================================================================================================
+ Case                                           Checks TA1   TA2  LLM TA1  TA2  Steps TA1  TA2  Sec TA1    TA2
+ 1. Wrong inventory answer: claims 103, has 3          0/3   3/3        1    0          3    5      0.3    0.1
+ 2. Basic order: 5 mice, 1.2 kg, 15 km                 2/3   3/3        1    1          3   11      0.2    0.4
+ 3. High-value order: 40 mice = $1,000                 0/3   3/3        1    1          3   11      0.3    0.4
+ 4. Follow-up 'make it 3' on the same thread           0/3   3/3        2    2          5   22      0.5    0.7
+ 5. Policy question + refusal + qty 0                  0/3   3/3        1    2          3   11      0.3    0.8
+ TOTAL                                                2/15 15/15        6    6         17   60      1.5    2.3
+
+ Checks passed: TA1 2/15 (13%), TA2 15/15 (100%)
+ Cost of TA2: 3.5x graph steps, 1.5x time, 6 vs 6 LLM calls (plus embedding calls for RAG)

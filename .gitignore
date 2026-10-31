@@ -1,0 +1,24 @@
+cat > .gitignore << 'EOF'
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+frontend/node_modules/
+dist/
+
+# Databases (re-created automatically on first run)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Vector index (rebuilt by ta2/demo.py)
+ta2/chroma_db/
+
+# Editor / OS
+.claude/
+.DS_Store
+EOF
